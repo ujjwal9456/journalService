@@ -1,12 +1,16 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import AsyncIterable, List, Dict
+import asyncio
 import uvicorn
+from fastapi.responses import StreamingResponse
+import json
 
-from ollama_client import chat
+from ollama_client import chat_stream
 from storage import save_message, load_conversation
 from prompts import COMPANION_PROMPT
+
 
 app = FastAPI(title="Journal CLI Middleware")
 
@@ -29,7 +33,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     try:
         # Convert Pydantic models to dict format for ollama_client
@@ -44,13 +48,26 @@ async def chat_endpoint(request: ChatRequest):
         if not conversation_history:
             conversation_history.insert(0, {"role": "system", "content": COMPANION_PROMPT})
         
+        async def event_generator()->AsyncIterable[str]:
+            full_response=[]
+
+            response_stream = chat_stream(conversation_history)
+            async for chunk in response_stream:
+                content = chunk.get("message", {}).get("content", "")
+                if content:
+                    full_response.append(content)
+                    yield f"data: {json.dumps({'text': content})}\n\n"
+                
+                await asyncio.sleep(0.01)
+            save_message("assistant", "".join(full_response))
+            yield "data: [DONE]\n\n"
+        
         # Get response from Ollama
-        response = chat(conversation_history)
+        #response = chat(conversation_history)
         
         # Save assistant response
-        save_message("assistant", response)
-        
-        return ChatResponse(response=response)
+        #save_message("assistant", response)
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
