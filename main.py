@@ -6,6 +6,10 @@ import asyncio
 import uvicorn
 from fastapi.responses import StreamingResponse
 import json
+import functools
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor(max_workers=4)
 
 from ollama_client import chat_stream
 from storage import save_message, load_conversation
@@ -50,18 +54,22 @@ async def chat_endpoint(request: ChatRequest):
         
         async def event_generator()->AsyncIterable[str]:
             full_response=[]
-
-            response_stream = chat_stream(conversation_history)
-            async for chunk in response_stream:
-                content = chunk.get("message", {}).get("content", "")
-                if content:
-                    full_response.append(content)
-                    yield f"data: {json.dumps({'text': content})}\n\n"
-                
-                await asyncio.sleep(0.01)
-            save_message("assistant", "".join(full_response))
-            yield "data: [DONE]\n\n"
-        
+            try:
+                response_stream = chat_stream(conversation_history)
+                async for chunk in response_stream:
+                    content = chunk.get("message", {}).get("content", "")
+                    if content:
+                        full_response.append(content)
+                        yield f"data: {json.dumps({'text': content})}\n\n"
+                    await asyncio.sleep(0.01)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    executor,
+                    functools.partial(save_message, "assistant", "".join(full_response))
+                )
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
         # Get response from Ollama
         #response = chat(conversation_history)
         
